@@ -1,5 +1,5 @@
-pandas
 pytz
 pyotp
 requests
 flask
+gunicorn
