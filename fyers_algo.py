@@ -1,5 +1,6 @@
 import time
 import datetime
+import threading
 import pytz
 import pyotp
 import requests
@@ -7,6 +8,7 @@ import base64
 import pandas as pd
 import numpy as np
 from urllib.parse import parse_qs, urlparse
+from flask import Flask
 from fyers_apiv3 import fyersModel
 
 # ==============================================================================
@@ -32,6 +34,12 @@ LOT_SIZE = 65
 TOTAL_QTY = LOT_SIZE * 2
 MAX_DAILY_TRADES = 4
 
+app = Flask(__name__)
+
+@app.route('/')
+def status_page():
+    return "FYERS Master Algo Engine is Running 24/7 on Render!"
+
 def get_ist_now():
     return datetime.datetime.now(IST)
 
@@ -39,23 +47,23 @@ def encode_str(string):
     return base64.b64encode(str(string).encode("ascii")).decode("ascii")
 
 # ==============================================================================
-# 3. 100% DYNAMIC SYMBOL & EXPIRY FINDER (NO HARDCODED DATES)
+# 3. 100% DYNAMIC SYMBOL & EXPIRY FINDER
 # ==============================================================================
 def get_active_nifty_contracts():
     while True:
         try:
             url = "https://fyers.in"
             df_sym = pd.read_csv(url, header=None)
-            nifty_df = df_sym[df_sym == "NIFTY"].copy()
+            nifty_df = df_sym[df_sym[13] == "NIFTY"].copy()
             now_ts = int(time.time())
-            nifty_df = nifty_df[nifty_df > now_ts].sort_values(by=8)
+            nifty_df = nifty_df[nifty_df[8] > now_ts].sort_values(by=8)
             
-            fut_df = nifty_df[nifty_df == "FUTIDX"]
-            active_fut_symbol = fut_df.iloc
+            fut_df = nifty_df[nifty_df[3] == "FUTIDX"]
+            active_fut_symbol = fut_df.iloc[0][9]
             
-            opt_df = nifty_df[nifty_df == "OPTIDX"]
-            nearest_opt_expiry = opt_df.iloc
-            current_week_opts = opt_df[opt_df == nearest_opt_expiry]
+            opt_df = nifty_df[nifty_df[3] == "OPTIDX"]
+            nearest_opt_expiry = opt_df.iloc[0][8]
+            current_week_opts = opt_df[opt_df[8] == nearest_opt_expiry]
             
             print(f"Auto-Detected Active Future: {active_fut_symbol}")
             return active_fut_symbol, current_week_opts
@@ -64,9 +72,9 @@ def get_active_nifty_contracts():
             time.sleep(5)
 
 def find_exact_option_symbol(opt_df, strike_price, opt_type):
-    match = opt_df[(opt_df == float(strike_price)) & (opt_df == opt_type)]
+    match = opt_df[(opt_df[15] == float(strike_price)) & (opt_df[16] == opt_type)]
     if not match.empty:
-        return match.iloc
+        return match.iloc[0][9]
     return None
 
 # ==============================================================================
@@ -85,9 +93,9 @@ def fyers_auto_login():
         r3 = ses.post("https://fyers.in", json={"request_key": req_key2, "identity_type": "pin", "identifier": encode_str(PIN)}).json()
         ses.headers.update({'authorization': f"Bearer {r3['data']['access_token']}"})
         
-        payload = {"fyers_id": FY_ID, "app_id": CLIENT_ID.split("-"), "redirect_uri": REDIRECT_URI, "appType": "100", "code_challenge": "", "state": "None", "scope": "", "nonce": "", "response_type": "code", "create_cookie": True}
+        payload = {"fyers_id": FY_ID, "app_id": CLIENT_ID.split("-")[0], "redirect_uri": REDIRECT_URI, "appType": "100", "code_challenge": "", "state": "None", "scope": "", "nonce": "", "response_type": "code", "create_cookie": True}
         r4 = ses.post("https://fyers.in", json=payload).json()
-        auth_code = parse_qs(urlparse(r4['Url']).query)['auth_code']
+        auth_code = parse_qs(urlparse(r4['Url']).query)['auth_code'][0]
         
         session = fyersModel.SessionModel(client_id=CLIENT_ID, secret_key=SECRET_KEY, redirect_uri=REDIRECT_URI, response_type="code", grant_type="authorization_code")
         session.set_token(auth_code)
@@ -101,17 +109,15 @@ def fyers_auto_login():
     return None
 
 # ==============================================================================
-# 5. TECHNICAL INDICATORS ENGINE (5-MINUTE TIMEFRAME)
+# 5. TECHNICAL INDICATORS & ORDER EXECUTION ENGINE
 # ==============================================================================
 def calculate_indicators(df):
     df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
     df['ema15'] = df['close'].ewm(span=15, adjust=False).mean()
-    
     exp1 = df['close'].ewm(span=12, adjust=False).mean()
     exp2 = df['close'].ewm(span=26, adjust=False).mean()
     df['macd'] = exp1 - exp2
     df['signal'] = df['macd'].ewm(span=9, adjust=False).mean()
-    
     df['vwap'] = (df['close'] * df['volume']).cumsum() / df['volume'].cumsum()
     
     high_low = df['high'] - df['low']
@@ -120,15 +126,13 @@ def calculate_indicators(df):
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     atr = tr.rolling(10).mean()
     hl2 = (df['high'] + df['low']) / 2
-    lowerband = hl2 - (2 * atr)
-    df['st_green'] = df['close'] > lowerband
+    df['st_green'] = df['close'] > (hl2 - (2 * atr))
     return df
 
 def fetch_5m_candles(fyers_client, symbol):
     today_str = get_ist_now().strftime("%Y-%m-%d")
     yesterday_str = (get_ist_now() - datetime.timedelta(days=4)).strftime("%Y-%m-%d")
-    data = {"symbol": symbol, "resolution": "5", "date_format": "1", "range_from": yesterday_str, "range_to": today_str, "cont_flag": "1"}
-    res = fyers_client.history(data=data)
+    res = fyers_client.history(data={"symbol": symbol, "resolution": "5", "date_format": "1", "range_from": yesterday_str, "range_to": today_str, "cont_flag": "1"})
     if res and res.get('s') == 'ok' and len(res['candles']) > 0:
         df = pd.DataFrame(res['candles'], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['datetime'] = pd.to_datetime(df['timestamp'], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata')
@@ -138,7 +142,7 @@ def fetch_5m_candles(fyers_client, symbol):
 def get_option_ltp(fyers_client, opt_symbol):
     res = fyers_client.quotes(data={"symbols": opt_symbol})
     if res and res.get('s') == 'ok' and len(res['d']) > 0:
-        return float(res['d']['v']['lp'])
+        return float(res['d'][0]['v']['lp'])
     return 0.0
 
 def execute_fyers_order(fyers_client, opt_symbol, side, qty, reason):
@@ -157,84 +161,76 @@ def execute_fyers_order(fyers_client, opt_symbol, side, qty, reason):
     return resp.get('s') == 'ok'
 
 # ==============================================================================
-# 6. 24/7 CLOUD BACKGROUND ENGINE (IST SYNCHRONIZED)
+# 6. BACKGROUND TRADING ENGINE
 # ==============================================================================
-fyers = None
-last_login_date = None
-nifty_fut_symbol = ""
-weekly_opt_df = None
+def run_algo_engine():
+    fyers = None
+    last_login_date = None
+    nifty_fut_symbol = ""
+    weekly_opt_df = None
 
-position = None
-active_option = ""
-trade_count = 0
-lot1_exited = False
-range_5m_locked = False
-first_5m_high, first_5m_low = 0.0, 0.0
-prev_day_high, prev_day_low = 0.0, 0.0
-is_gap_day = False
+    position = None
+    active_option = ""
+    trade_count = 0
+    lot1_exited = False
+    range_5m_locked = False
+    first_5m_high, first_5m_low = 0.0, 0.0
+    prev_day_high, prev_day_low = 0.0, 0.0
+    is_gap_day = False
 
-print("Cloud Engine Started! 100% Dynamic Auto-Expiry Mode Active...")
+    print("Cloud Engine Started! 100% Dynamic Auto-Expiry Mode Active...")
 
-while True:
-    now_dt = get_ist_now()
-    now = now_dt.time()
-    today_date = now_dt.date()
+    while True:
+        now_dt = get_ist_now()
+        now = now_dt.time()
+        today_date = now_dt.date()
 
-    if now_dt.weekday() >= 5:
-        time.sleep(60)
-        continue
-
-    if now >= datetime.time(9, 5) and last_login_date != today_date and now < datetime.time(15, 15):
-        fyers = fyers_auto_login()
-        if fyers:
-            nifty_fut_symbol, weekly_opt_df = get_active_nifty_contracts()
-            last_login_date = today_date
-            position = None
-            trade_count = 0
-            range_5m_locked = False
-        else:
-            time.sleep(30)
+        if now_dt.weekday() >= 5:
+            time.sleep(60)
             continue
 
-    if fyers is None or now < datetime.time(9, 15) or now > datetime.time(15, 20):
-        time.sleep(10)
-        continue
+        if now >= datetime.time(9, 5) and last_login_date != today_date and now < datetime.time(15, 15):
+            fyers = fyers_auto_login()
+            if fyers:
+                nifty_fut_symbol, weekly_opt_df = get_active_nifty_contracts()
+                last_login_date = today_date
+                position = None
+                trade_count = 0
+                range_5m_locked = False
+            else:
+                time.sleep(30)
+                continue
 
-    try:
-        df = fetch_5m_candles(fyers, nifty_fut_symbol)
-        if df is None or len(df) < 30:
-            time.sleep(5)
+        if fyers is None or now < datetime.time(9, 15) or now > datetime.time(15, 20):
+            time.sleep(10)
             continue
 
-        df = calculate_indicators(df)
-        today_df = df[df['datetime'].dt.date == today_date]
-        prev_df = df[df['datetime'].dt.date < today_date]
+        try:
+            df = fetch_5m_candles(fyers, nifty_fut_symbol)
+            if df is None or len(df) < 30:
+                time.sleep(5)
+                continue
 
-        if len(today_df) < 2 or len(prev_df) == 0:
-            time.sleep(5)
-            continue
+            df = calculate_indicators(df)
+            today_df = df[df['datetime'].dt.date == today_date]
+            prev_df = df[df['datetime'].dt.date < today_date]
 
-        if not range_5m_locked and now >= datetime.time(9, 20):
-            last_prev_date = prev_df['datetime'].dt.date.max()
-            yest_df = prev_df[prev_df['datetime'].dt.date == last_prev_date]
-            prev_day_high = float(yest_df['high'].max())
-            prev_day_low = float(yest_df['low'].min())
+            if len(today_df) < 2 or len(prev_df) == 0:
+                time.sleep(5)
+                continue
 
-            first_candle = today_df.iloc
-            first_5m_high = float(first_candle['high'])
-            first_5m_low = float(first_candle['low'])
-            day_open = float(first_candle['open'])
+            if not range_5m_locked and now >= datetime.time(9, 20):
+                last_prev_date = prev_df['datetime'].dt.date.max()
+                yest_df = prev_df[prev_df['datetime'].dt.date == last_prev_date]
+                prev_day_high = float(yest_df['high'].max())
+                prev_day_low = float(yest_df['low'].min())
 
-            is_gap_day = (day_open > prev_day_high) or (day_open < prev_day_low)
-            range_5m_locked = True
-            print(f"[09:20 IST] Range Locked | 5m High: {first_5m_high} | 5m Low: {first_5m_low} | Gap Day: {is_gap_day}")
+                first_candle = today_df.iloc[0]
+                first_5m_high = float(first_candle['high'])
+                first_5m_low = float(first_candle['low'])
+                day_open = float(first_candle['open'])
 
-        curr = today_df.iloc[-1]
-        prev = today_df.iloc[-2]
-        fut_ltp = float(curr['close'])
+                is_gap_day = (day_open > prev_day_high) or (day_open < prev_day_low)
+                range_5m_locked = True
+                print(f"[09:20 IST] Range Locked | 5m High: {first_5m_high} | 5m Low: {first_5m_low} | Gap Day: {is_gap_day}")
 
-        if position is None and trade_count < MAX_DAILY_TRADES and range_5m_locked and datetime.time(9, 20) <= now < datetime.time(15, 0):
-            rounded_strike = int(round(fut_ltp / 100.0) * 100)
-            
-            if trade_count == 0:
-                if not is_gap_day:
