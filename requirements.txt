@@ -1,9 +1,5 @@
-fyers-apiv3
 pandas
-numpy
 pytz
 pyotp
 requests
 flask
-setuptools
-wheel
