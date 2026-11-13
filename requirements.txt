@@ -5,3 +5,5 @@ pytz
 pyotp
 requests
 flask
+setuptools
+wheel
