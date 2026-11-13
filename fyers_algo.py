@@ -54,16 +54,16 @@ def get_active_nifty_contracts():
         try:
             url = "https://fyers.in"
             df_sym = pd.read_csv(url, header=None)
-            nifty_df = df_sym[df_sym[13] == "NIFTY"].copy()
+            nifty_df = df_sym[df_sym.iloc[:, 13] == "NIFTY"].copy()
             now_ts = int(time.time())
-            nifty_df = nifty_df[nifty_df[8] > now_ts].sort_values(by=8)
+            nifty_df = nifty_df[nifty_df.iloc[:, 8] > now_ts].sort_values(by=8)
             
-            fut_df = nifty_df[nifty_df[3] == "FUTIDX"]
-            active_fut_symbol = fut_df.iloc[0][9]
+            fut_df = nifty_df[nifty_df.iloc[:, 3] == "FUTIDX"]
+            active_fut_symbol = str(fut_df.iloc[0, 9])
             
-            opt_df = nifty_df[nifty_df[3] == "OPTIDX"]
-            nearest_opt_expiry = opt_df.iloc[0][8]
-            current_week_opts = opt_df[opt_df[8] == nearest_opt_expiry]
+            opt_df = nifty_df[nifty_df.iloc[:, 3] == "OPTIDX"]
+            nearest_opt_expiry = opt_df.iloc[0, 8]
+            current_week_opts = opt_df[opt_df.iloc[:, 8] == nearest_opt_expiry]
             
             print(f"Auto-Detected Active Future: {active_fut_symbol}")
             return active_fut_symbol, current_week_opts
@@ -72,9 +72,11 @@ def get_active_nifty_contracts():
             time.sleep(5)
 
 def find_exact_option_symbol(opt_df, strike_price, opt_type):
-    match = opt_df[(opt_df[15] == float(strike_price)) & (opt_df[16] == opt_type)]
+    if opt_df is None:
+        return None
+    match = opt_df[(opt_df.iloc[:, 15] == float(strike_price)) & (opt_df.iloc[:, 16] == opt_type)]
     if not match.empty:
-        return match.iloc[0][9]
+        return str(match.iloc[0, 9])
     return None
 
 # ==============================================================================
@@ -93,7 +95,8 @@ def fyers_auto_login():
         r3 = ses.post("https://fyers.in", json={"request_key": req_key2, "identity_type": "pin", "identifier": encode_str(PIN)}).json()
         ses.headers.update({'authorization': f"Bearer {r3['data']['access_token']}"})
         
-        payload = {"fyers_id": FY_ID, "app_id": CLIENT_ID.split("-")[0], "redirect_uri": REDIRECT_URI, "appType": "100", "code_challenge": "", "state": "None", "scope": "", "nonce": "", "response_type": "code", "create_cookie": True}
+        app_prefix = CLIENT_ID.split("-")[0]
+        payload = {"fyers_id": FY_ID, "app_id": app_prefix, "redirect_uri": REDIRECT_URI, "appType": "100", "code_challenge": "", "state": "None", "scope": "", "nonce": "", "response_type": "code", "create_cookie": True}
         r4 = ses.post("https://fyers.in", json=payload).json()
         auth_code = parse_qs(urlparse(r4['Url']).query)['auth_code'][0]
         
@@ -232,5 +235,3 @@ def run_algo_engine():
 
                 is_gap_day = (day_open > prev_day_high) or (day_open < prev_day_low)
                 range_5m_locked = True
-                print(f"[09:20 IST] Range Locked | 5m High: {first_5m_high} | 5m Low: {first_5m_low} | Gap Day: {is_gap_day}")
-
