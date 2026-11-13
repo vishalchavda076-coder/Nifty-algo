@@ -5,11 +5,10 @@ import pytz
 import pyotp
 import requests
 import base64
+import hashlib
 import pandas as pd
-import numpy as np
 from urllib.parse import parse_qs, urlparse
 from flask import Flask
-from fyers_apiv3 import fyersModel
 
 # ==============================================================================
 # 1. FYERS AUTO-LOGIN CREDENTIALS
@@ -38,7 +37,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def status_page():
-    return "FYERS Master Algo Engine is Running 24/7 on Render!"
+    return "FYERS Master Algo Engine is LIVE and Running 24/7!"
 
 def get_ist_now():
     return datetime.datetime.now(IST)
@@ -80,7 +79,7 @@ def find_exact_option_symbol(opt_df, strike_price, opt_type):
     return None
 
 # ==============================================================================
-# 4. AUTOMATIC TOTP LOGIN FUNCTION
+# 4. DIRECT FYERS API AUTO-LOGIN (NO EXTERNAL SDK NEEDED)
 # ==============================================================================
 def fyers_auto_login():
     try:
@@ -100,19 +99,24 @@ def fyers_auto_login():
         r4 = ses.post("https://fyers.in", json=payload).json()
         auth_code = parse_qs(urlparse(r4['Url']).query)['auth_code'][0]
         
-        session = fyersModel.SessionModel(client_id=CLIENT_ID, secret_key=SECRET_KEY, redirect_uri=REDIRECT_URI, response_type="code", grant_type="authorization_code")
-        session.set_token(auth_code)
-        token_resp = session.generate_token()
+        app_id_hash = hashlib.sha256(f"{CLIENT_ID}:{SECRET_KEY}".encode()).hexdigest()
+        token_resp = requests.post("https://fyers.in", json={
+            "grant_type": "authorization_code",
+            "appIdHash": app_id_hash,
+            "code": auth_code
+        }).json()
         
         if "access_token" in token_resp:
             print(f"[{get_ist_now().strftime('%H:%M:%S')}] Auto-Login Successful! Mode: {'PAPER TRADE' if PAPER_TRADE_MODE else 'REAL LIVE'}")
-            return fyersModel.FyersModel(client_id=CLIENT_ID, is_async=False, token=token_resp["access_token"], log_path="")
+            return token_resp["access_token"]
+        else:
+            print(f"Token Error: {token_resp}")
     except Exception as e:
         print(f"Auto-Login Failed: {e}")
     return None
 
 # ==============================================================================
-# 5. TECHNICAL INDICATORS & ORDER EXECUTION ENGINE
+# 5. DIRECT API DATA & ORDER FUNCTIONS
 # ==============================================================================
 def calculate_indicators(df):
     df['ema9'] = df['close'].ewm(span=9, adjust=False).mean()
@@ -124,42 +128,46 @@ def calculate_indicators(df):
     df['vwap'] = (df['close'] * df['volume']).cumsum() / df['volume'].cumsum()
     
     high_low = df['high'] - df['low']
-    high_close = np.abs(df['high'] - df['close'].shift())
-    low_close = np.abs(df['low'] - df['close'].shift())
+    high_close = (df['high'] - df['close'].shift()).abs()
+    low_close = (df['low'] - df['close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     atr = tr.rolling(10).mean()
     hl2 = (df['high'] + df['low']) / 2
     df['st_green'] = df['close'] > (hl2 - (2 * atr))
     return df
 
-def fetch_5m_candles(fyers_client, symbol):
+def fetch_5m_candles(token, symbol):
     today_str = get_ist_now().strftime("%Y-%m-%d")
     yesterday_str = (get_ist_now() - datetime.timedelta(days=4)).strftime("%Y-%m-%d")
-    res = fyers_client.history(data={"symbol": symbol, "resolution": "5", "date_format": "1", "range_from": yesterday_str, "range_to": today_str, "cont_flag": "1"})
-    if res and res.get('s') == 'ok' and len(res['candles']) > 0:
+    headers = {"Authorization": f"{CLIENT_ID}:{token}"}
+    params = {"symbol": symbol, "resolution": "5", "date_format": "1", "range_from": yesterday_str, "range_to": today_str, "cont_flag": "1"}
+    res = requests.get("https://fyers.in", headers=headers, params=params).json()
+    if res and res.get('s') == 'ok' and len(res.get('candles', [])) > 0:
         df = pd.DataFrame(res['candles'], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['datetime'] = pd.to_datetime(df['timestamp'], unit='s').dt.tz_localize('UTC').dt.tz_convert('Asia/Kolkata')
         return df
     return None
 
-def get_option_ltp(fyers_client, opt_symbol):
-    res = fyers_client.quotes(data={"symbols": opt_symbol})
-    if res and res.get('s') == 'ok' and len(res['d']) > 0:
+def get_option_ltp(token, opt_symbol):
+    headers = {"Authorization": f"{CLIENT_ID}:{token}"}
+    res = requests.get("https://fyers.in", headers=headers, params={"symbols": opt_symbol}).json()
+    if res and res.get('s') == 'ok' and len(res.get('d', [])) > 0:
         return float(res['d'][0]['v']['lp'])
     return 0.0
 
-def execute_fyers_order(fyers_client, opt_symbol, side, qty, reason):
+def execute_fyers_order(token, opt_symbol, side, qty, reason):
     if not opt_symbol:
         return False
     t_now = get_ist_now().strftime("%H:%M:%S")
-    ltp = get_option_ltp(fyers_client, opt_symbol)
+    ltp = get_option_ltp(token, opt_symbol)
     print(f"[{t_now} IST] {side} | {opt_symbol} | Qty: {qty} | Option LTP: {ltp} | Reason: {reason}")
     
     if PAPER_TRADE_MODE:
         return True
         
+    headers = {"Authorization": f"{CLIENT_ID}:{token}", "Content-Type": "application/json"}
     order_data = {"symbol": opt_symbol, "qty": qty, "type": 2, "side": 1 if side == "BUY" else -1, "productType": "INTRADAY", "limitPrice": 0, "stopPrice": 0, "validity": "DAY", "disclosedQty": 0, "offlineOrder": False}
-    resp = fyers_client.place_order(data=order_data)
+    resp = requests.post("https://fyers.in", headers=headers, json=order_data).json()
     print(f"Broker Order Response: {resp}")
     return resp.get('s') == 'ok'
 
@@ -167,7 +175,7 @@ def execute_fyers_order(fyers_client, opt_symbol, side, qty, reason):
 # 6. BACKGROUND TRADING ENGINE
 # ==============================================================================
 def run_algo_engine():
-    fyers = None
+    access_token = None
     last_login_date = None
     nifty_fut_symbol = ""
     weekly_opt_df = None
@@ -181,7 +189,7 @@ def run_algo_engine():
     prev_day_high, prev_day_low = 0.0, 0.0
     is_gap_day = False
 
-    print("Cloud Engine Started! 100% Dynamic Auto-Expiry Mode Active...")
+    print("Cloud Engine Started! Lightweight Direct API Mode Active...")
 
     while True:
         now_dt = get_ist_now()
@@ -193,8 +201,8 @@ def run_algo_engine():
             continue
 
         if now >= datetime.time(9, 5) and last_login_date != today_date and now < datetime.time(15, 15):
-            fyers = fyers_auto_login()
-            if fyers:
+            access_token = fyers_auto_login()
+            if access_token:
                 nifty_fut_symbol, weekly_opt_df = get_active_nifty_contracts()
                 last_login_date = today_date
                 position = None
@@ -204,12 +212,12 @@ def run_algo_engine():
                 time.sleep(30)
                 continue
 
-        if fyers is None or now < datetime.time(9, 15) or now > datetime.time(15, 20):
+        if access_token is None or now < datetime.time(9, 15) or now > datetime.time(15, 20):
             time.sleep(10)
             continue
 
         try:
-            df = fetch_5m_candles(fyers, nifty_fut_symbol)
+            df = fetch_5m_candles(access_token, nifty_fut_symbol)
             if df is None or len(df) < 30:
                 time.sleep(5)
                 continue
@@ -225,13 +233,3 @@ def run_algo_engine():
             if not range_5m_locked and now >= datetime.time(9, 20):
                 last_prev_date = prev_df['datetime'].dt.date.max()
                 yest_df = prev_df[prev_df['datetime'].dt.date == last_prev_date]
-                prev_day_high = float(yest_df['high'].max())
-                prev_day_low = float(yest_df['low'].min())
-
-                first_candle = today_df.iloc[0]
-                first_5m_high = float(first_candle['high'])
-                first_5m_low = float(first_candle['low'])
-                day_open = float(first_candle['open'])
-
-                is_gap_day = (day_open > prev_day_high) or (day_open < prev_day_low)
-                range_5m_locked = True
