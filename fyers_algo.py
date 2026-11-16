@@ -36,6 +36,7 @@ MAX_DAILY_TRADES = 4
 
 app = Flask(__name__)
 live_status_logs = list()
+engine_started = False
 
 def add_log(msg):
     t_str = datetime.datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')
@@ -44,11 +45,6 @@ def add_log(msg):
     live_status_logs.append(full_msg)
     if len(live_status_logs) > 60:
         live_status_logs.pop(0)
-
-@app.route('/')
-def status_page():
-    logs_html = "<br>".join(reversed(live_status_logs)) if live_status_logs else "Engine Starting... Refresh in 10 seconds."
-    return f"<html><body style='font-family:monospace; padding:15px; background:#111; color:#0f0;'><h3>🚀 FYERS Master Algo Live Dashboard</h3><hr>{logs_html}</body></html>"
 
 def get_ist_now():
     return datetime.datetime.now(IST)
@@ -250,3 +246,16 @@ def run_algo_engine():
     last = itemgetter(-1)
     second_last = itemgetter(-2)
     get_high = itemgetter(2)
+    get_low = itemgetter(3)
+
+    access_token = None
+    last_login_date = None
+    nifty_fut_symbol = ""
+    weekly_opt_list = None
+
+    position = None
+    active_option = ""
+    trade_count = 0
+    lot1_exited = False
+    range_5m_locked = False
+    first_5m_high, first_5m_low = 0.0, 0.0
