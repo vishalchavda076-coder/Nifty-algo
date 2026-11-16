@@ -1,3 +1,4 @@
+import os
 import time
 import datetime
 import threading
@@ -8,6 +9,7 @@ import pyotp
 import requests
 import base64
 import hashlib
+from operator import itemgetter
 from urllib.parse import parse_qs, urlparse
 from flask import Flask
 
@@ -22,8 +24,6 @@ CLIENT_ID = "FAA22422-100"
 SECRET_KEY = "XCFJZS7OFF"
 REDIRECT_URI = "https://fyers.in"
 
-# True = Virtual Paper Trading Mode (Safe Testing)
-# False = Live Real Money Execution Mode
 PAPER_TRADE_MODE = True
 
 # ==============================================================================
@@ -35,10 +35,20 @@ TOTAL_QTY = LOT_SIZE * 2
 MAX_DAILY_TRADES = 4
 
 app = Flask(__name__)
+live_status_logs = list()
+
+def add_log(msg):
+    t_str = datetime.datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')
+    full_msg = f"[{t_str} IST] {msg}"
+    print(full_msg, flush=True)
+    live_status_logs.append(full_msg)
+    if len(live_status_logs) > 60:
+        live_status_logs.pop(0)
 
 @app.route('/')
 def status_page():
-    return "FYERS Master Algo Engine is LIVE and Running 24/7!"
+    logs_html = "<br>".join(reversed(live_status_logs)) if live_status_logs else "Engine Starting... Refresh in 10 seconds."
+    return f"<html><body style='font-family:monospace; padding:15px; background:#111; color:#0f0;'><h3>🚀 FYERS Master Algo Live Dashboard</h3><hr>{logs_html}</body></html>"
 
 def get_ist_now():
     return datetime.datetime.now(IST)
@@ -47,9 +57,18 @@ def encode_str(string):
     return base64.b64encode(str(string).encode("ascii")).decode("ascii")
 
 # ==============================================================================
-# 3. 100% DYNAMIC SYMBOL & EXPIRY FINDER (PURE PYTHON - NO PANDAS)
+# 3. 100% DYNAMIC SYMBOL & EXPIRY FINDER
 # ==============================================================================
 def get_active_nifty_contracts():
+    get_inst = itemgetter(3)
+    get_exp = itemgetter(8)
+    get_sym = itemgetter(9)
+    get_und = itemgetter(13)
+    get_strk = itemgetter(15)
+    get_opt = itemgetter(16)
+    first = itemgetter(0)
+    second = itemgetter(1)
+
     while True:
         try:
             url = "https://fyers.in"
@@ -57,29 +76,31 @@ def get_active_nifty_contracts():
             reader = csv.reader(io.StringIO(resp.text))
             
             now_ts = int(time.time())
-            futures = []
-            options = []
+            futures = list()
+            options = list()
             
             for row in reader:
-                if len(row) > 16 and row[13] == "NIFTY":
-                    exp_ts = int(row[8])
+                if len(row) > 16 and get_und(row) == "NIFTY":
+                    exp_ts = int(get_exp(row))
                     if exp_ts > now_ts:
-                        if row[3] == "FUTIDX":
-                            futures.append((exp_ts, row[9]))
-                        elif row[3] == "OPTIDX":
-                            options.append((exp_ts, float(row[15]), row[16], row[9]))
+                        inst = get_inst(row)
+                        sym = get_sym(row)
+                        if inst == "FUTIDX":
+                            futures.append((exp_ts, sym))
+                        elif inst == "OPTIDX":
+                            options.append((exp_ts, float(get_strk(row)), get_opt(row), sym))
                             
-            futures.sort(key=lambda x: x[0])
-            active_fut_symbol = futures[0][1]
+            futures.sort(key=first)
+            active_fut_symbol = second(first(futures))
             
-            options.sort(key=lambda x: x[0])
-            nearest_opt_exp = options[0][0]
-            current_week_opts = [opt for opt in options if opt[0] == nearest_opt_exp]
+            options.sort(key=first)
+            nearest_opt_exp = first(first(options))
+            current_week_opts = list(filter(lambda x: first(x) == nearest_opt_exp, options))
             
-            print(f"Auto-Detected Active Future: {active_fut_symbol}")
+            add_log(f"📅 Active Future Selected: {active_fut_symbol}")
             return active_fut_symbol, current_week_opts
         except Exception as e:
-            print(f"Retrying Symbol Master Download: {e}")
+            add_log(f"⚠️ Retrying Symbol Master: {e}")
             time.sleep(5)
 
 def find_exact_option_symbol(opt_list, strike_price, opt_type):
@@ -94,22 +115,23 @@ def find_exact_option_symbol(opt_list, strike_price, opt_type):
 # 4. DIRECT FYERS API AUTO-LOGIN
 # ==============================================================================
 def fyers_auto_login():
+    first = itemgetter(0)
     try:
         ses = requests.Session()
         r1 = ses.post("https://fyers.in", json={"fy_id": encode_str(FY_ID), "app_id": "2"}).json()
-        req_key = r1["request_key"]
+        req_key = r1.get("request_key")
         
         totp = pyotp.TOTP(TOTP_KEY).now()
         r2 = ses.post("https://fyers.in", json={"request_key": req_key, "otp": totp}).json()
-        req_key2 = r2["request_key"]
+        req_key2 = r2.get("request_key")
         
         r3 = ses.post("https://fyers.in", json={"request_key": req_key2, "identity_type": "pin", "identifier": encode_str(PIN)}).json()
-        ses.headers.update({'authorization': f"Bearer {r3['data']['access_token']}"})
+        ses.headers.update({'authorization': f"Bearer {r3.get('data').get('access_token')}"})
         
-        app_prefix = CLIENT_ID.split("-")[0]
+        app_prefix = first(CLIENT_ID.split("-"))
         payload = {"fyers_id": FY_ID, "app_id": app_prefix, "redirect_uri": REDIRECT_URI, "appType": "100", "code_challenge": "", "state": "None", "scope": "", "nonce": "", "response_type": "code", "create_cookie": True}
         r4 = ses.post("https://fyers.in", json=payload).json()
-        auth_code = parse_qs(urlparse(r4['Url']).query)['auth_code'][0]
+        auth_code = first(parse_qs(urlparse(r4.get('Url')).query).get('auth_code'))
         
         app_id_hash = hashlib.sha256(f"{CLIENT_ID}:{SECRET_KEY}".encode()).hexdigest()
         token_resp = requests.post("https://fyers.in", json={
@@ -119,62 +141,70 @@ def fyers_auto_login():
         }).json()
         
         if "access_token" in token_resp:
-            print(f"[{get_ist_now().strftime('%H:%M:%S')}] Auto-Login Successful! Mode: {'PAPER TRADE' if PAPER_TRADE_MODE else 'REAL LIVE'}")
-            return token_resp["access_token"]
+            add_log(f"✅ Auto-Login Successful! Mode: {'PAPER TRADE' if PAPER_TRADE_MODE else 'REAL LIVE'}")
+            return token_resp.get("access_token")
         else:
-            print(f"Token Error: {token_resp}")
+            add_log(f"❌ Token Error: {token_resp}")
     except Exception as e:
-        print(f"Auto-Login Failed: {e}")
+        add_log(f"❌ Auto-Login Failed: {e}")
     return None
 
 # ==============================================================================
 # 5. PURE PYTHON INDICATORS & API FUNCTIONS
 # ==============================================================================
 def calc_ema(prices, period):
-    ema = []
+    ema = list()
     k = 2 / (period + 1)
+    prev_ema = 0.0
     for i, p in enumerate(prices):
         if i == 0:
-            ema.append(p)
+            prev_ema = p
         else:
-            ema.append(p * k + ema[-1] * (1 - k))
+            prev_ema = p * k + prev_ema * (1 - k)
+        ema.append(prev_ema)
     return ema
 
 def calculate_indicators(candles):
-    closes = [c[4] for c in candles]
-    highs = [c[2] for c in candles]
-    lows = [c[3] for c in candles]
-    vols = [c[5] for c in candles]
+    closes = list(map(itemgetter(4), candles))
+    highs = list(map(itemgetter(2), candles))
+    lows = list(map(itemgetter(3), candles))
+    vols = list(map(itemgetter(5), candles))
     
     ema9 = calc_ema(closes, 9)
     ema15 = calc_ema(closes, 15)
     ema12 = calc_ema(closes, 12)
     ema26 = calc_ema(closes, 26)
-    macd = [m - s for m, s in zip(ema12, ema26)]
+    macd = list(map(lambda x: x - x, zip(ema12, ema26)))
     signal = calc_ema(macd, 9)
     
-    cum_pv, cum_v, vwap = 0.0, 0.0, []
+    cum_pv, cum_v, vwap = 0.0, 0.0, list()
     for c, v in zip(closes, vols):
         cum_pv += c * v
         cum_v += v
         vwap.append(cum_pv / cum_v if cum_v > 0 else c)
         
-    trs = []
-    for i in range(len(candles)):
+    trs = list()
+    prev_c = 0.0
+    for i, (h, l, c) in enumerate(zip(highs, lows, closes)):
         if i == 0:
-            trs.append(highs[i] - lows[i])
+            trs.append(h - l)
         else:
-            tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
+            tr = max(h - l, abs(h - prev_c), abs(l - prev_c))
             trs.append(tr)
+        prev_c = c
             
-    st_green = []
-    for i in range(len(candles)):
-        if i < 10:
+    st_green = list()
+    tr_window = list()
+    for h, l, c, tr in zip(highs, lows, closes, trs):
+        tr_window.append(tr)
+        if len(tr_window) > 10:
+            tr_window.pop(0)
+        if len(tr_window) < 10:
             st_green.append(True)
         else:
-            atr = sum(trs[i-9:i+1]) / 10.0
-            hl2 = (highs[i] + lows[i]) / 2.0
-            st_green.append(closes[i] > (hl2 - 2 * atr))
+            atr = sum(tr_window) / 10.0
+            hl2 = (h + l) / 2.0
+            st_green.append(c > (hl2 - 2 * atr))
             
     return ema9, ema15, macd, signal, vwap, st_green
 
@@ -184,23 +214,24 @@ def fetch_5m_candles(token, symbol):
     headers = {"Authorization": f"{CLIENT_ID}:{token}"}
     params = {"symbol": symbol, "resolution": "5", "date_format": "1", "range_from": yesterday_str, "range_to": today_str, "cont_flag": "1"}
     res = requests.get("https://fyers.in", headers=headers, params=params).json()
-    if res and res.get('s') == 'ok' and len(res.get('candles', [])) > 0:
-        return res['candles']
+    if res and res.get('s') == 'ok' and len(res.get('candles', list())) > 0:
+        return res.get('candles')
     return None
 
 def get_option_ltp(token, opt_symbol):
+    first = itemgetter(0)
     headers = {"Authorization": f"{CLIENT_ID}:{token}"}
     res = requests.get("https://fyers.in", headers=headers, params={"symbols": opt_symbol}).json()
-    if res and res.get('s') == 'ok' and len(res.get('d', [])) > 0:
-        return float(res['d'][0]['v']['lp'])
+    if res and res.get('s') == 'ok' and len(res.get('d', list())) > 0:
+        first_item = first(res.get('d'))
+        return float(first_item.get('v').get('lp'))
     return 0.0
 
 def execute_fyers_order(token, opt_symbol, side, qty, reason):
     if not opt_symbol:
         return False
-    t_now = get_ist_now().strftime("%H:%M:%S")
     ltp = get_option_ltp(token, opt_symbol)
-    print(f"[{t_now} IST] {side} | {opt_symbol} | Qty: {qty} | Option LTP: {ltp} | Reason: {reason}")
+    add_log(f"🎯 {side} | {opt_symbol} | Qty: {qty} | Option LTP: ₹{ltp} | {reason}")
     
     if PAPER_TRADE_MODE:
         return True
@@ -208,49 +239,14 @@ def execute_fyers_order(token, opt_symbol, side, qty, reason):
     headers = {"Authorization": f"{CLIENT_ID}:{token}", "Content-Type": "application/json"}
     order_data = {"symbol": opt_symbol, "qty": qty, "type": 2, "side": 1 if side == "BUY" else -1, "productType": "INTRADAY", "limitPrice": 0, "stopPrice": 0, "validity": "DAY", "disclosedQty": 0, "offlineOrder": False}
     resp = requests.post("https://fyers.in", headers=headers, json=order_data).json()
-    print(f"Broker Order Response: {resp}")
+    add_log(f"Broker Response: {resp}")
     return resp.get('s') == 'ok'
 
 # ==============================================================================
 # 6. BACKGROUND TRADING ENGINE
 # ==============================================================================
 def run_algo_engine():
-    access_token = None
-    last_login_date = None
-    nifty_fut_symbol = ""
-    weekly_opt_list = None
-
-    position = None
-    active_option = ""
-    trade_count = 0
-    lot1_exited = False
-    range_5m_locked = False
-    first_5m_high, first_5m_low = 0.0, 0.0
-    prev_day_high, prev_day_low = 0.0, 0.0
-    is_gap_day = False
-
-    print("Cloud Engine Started! Ultra-Fast Pure Python Mode Active...")
-
-    while True:
-        now_dt = get_ist_now()
-        now = now_dt.time()
-        today_date = now_dt.date()
-
-        if now_dt.weekday() >= 5:
-            time.sleep(60)
-            continue
-
-        if now >= datetime.time(9, 5) and last_login_date != today_date and now < datetime.time(15, 15):
-            access_token = fyers_auto_login()
-            if access_token:
-                nifty_fut_symbol, weekly_opt_list = get_active_nifty_contracts()
-                last_login_date = today_date
-                position = None
-                trade_count = 0
-                range_5m_locked = False
-            else:
-                time.sleep(30)
-                continue
-
-        if access_token is None or now < datetime.time(9, 15) or now > datetime.time(15, 20):
-            time.sleep(10)
+    first = itemgetter(0)
+    last = itemgetter(-1)
+    second_last = itemgetter(-2)
+    get_high = itemgetter(2)
