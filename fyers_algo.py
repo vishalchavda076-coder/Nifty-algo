@@ -26,7 +26,7 @@ REDIRECT_URI = "https://fyers.in"
 PAPER_TRADE_MODE = True
 
 # ==============================================================================
-# 2. MASTER STRATEGY SETTINGS (LOT SIZE 65 | MAX 4 TRADES | IST TIMEZONE)
+# 2. MASTER STRATEGY SETTINGS
 # ==============================================================================
 IST = pytz.timezone('Asia/Kolkata')
 LOT_SIZE = 65
@@ -35,7 +35,6 @@ MAX_DAILY_TRADES = 4
 
 app = Flask(__name__)
 
-# Global State Memory
 state = {
     "logs": list(),
     "token": None,
@@ -70,7 +69,7 @@ def encode_str(string):
     return base64.b64encode(str(string).encode("ascii")).decode("ascii")
 
 # ==============================================================================
-# 3. 100% DYNAMIC SYMBOL & EXPIRY FINDER
+# 3. DYNAMIC SYMBOL & EXPIRY FINDER
 # ==============================================================================
 def get_active_nifty_contracts():
     get_inst = itemgetter(3)
@@ -162,7 +161,7 @@ def fyers_auto_login():
     return None
 
 # ==============================================================================
-# 5. PURE PYTHON INDICATORS & API FUNCTIONS
+# 5. INDICATORS & API FUNCTIONS
 # ==============================================================================
 def calc_ema(prices, period):
     ema = list()
@@ -255,7 +254,7 @@ def execute_fyers_order(token, opt_symbol, side, qty, reason):
     return resp.get('s') == 'ok'
 
 # ==============================================================================
-# 6. DIRECT EXECUTION ON EVERY PING (NO BACKGROUND THREAD NEEDED)
+# 6. TRADING CYCLE LOGIC
 # ==============================================================================
 def run_one_cycle():
     first = itemgetter(0)
@@ -263,4 +262,8 @@ def run_one_cycle():
     second_last = itemgetter(-2)
     get_high = itemgetter(2)
     get_low = itemgetter(3)
+
+    now_dt = get_ist_now()
+    now = now_dt.time()
+    today_date = now_dt.date()
 
