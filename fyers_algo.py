@@ -12,9 +12,6 @@ from operator import itemgetter
 from urllib.parse import parse_qs, urlparse
 from flask import Flask
 
-# ==============================================================================
-# 1. FYERS AUTO-LOGIN CREDENTIALS
-# ==============================================================================
 FY_ID = "FAA22422"
 PIN = "5747"
 TOTP_KEY = "6L7JXLEFKGAU562T7MGCU5NLZZ5ITBXR"
@@ -25,9 +22,6 @@ REDIRECT_URI = "https://fyers.in"
 
 PAPER_TRADE_MODE = True
 
-# ==============================================================================
-# 2. MASTER STRATEGY SETTINGS
-# ==============================================================================
 IST = pytz.timezone('Asia/Kolkata')
 LOT_SIZE = 65
 TOTAL_QTY = LOT_SIZE * 2
@@ -68,9 +62,6 @@ def get_ist_now():
 def encode_str(string):
     return base64.b64encode(str(string).encode("ascii")).decode("ascii")
 
-# ==============================================================================
-# 3. DYNAMIC SYMBOL & EXPIRY FINDER
-# ==============================================================================
 def get_active_nifty_contracts():
     get_inst = itemgetter(3)
     get_exp = itemgetter(8)
@@ -108,10 +99,10 @@ def get_active_nifty_contracts():
         nearest_opt_exp = first(first(options))
         current_week_opts = list(filter(lambda x: first(x) == nearest_opt_exp, options))
         
-        add_log(f"📅 Active Future Selected: {active_fut_symbol}")
+        add_log(f"Active Future Selected: {active_fut_symbol}")
         return active_fut_symbol, current_week_opts
     except Exception as e:
-        add_log(f"⚠️ Symbol Master Error: {e}")
+        add_log(f"Symbol Master Error: {e}")
         return "", None
 
 def find_exact_option_symbol(opt_list, strike_price, opt_type):
@@ -122,9 +113,6 @@ def find_exact_option_symbol(opt_list, strike_price, opt_type):
             return sym
     return None
 
-# ==============================================================================
-# 4. DIRECT FYERS API AUTO-LOGIN
-# ==============================================================================
 def fyers_auto_login():
     first = itemgetter(0)
     try:
@@ -152,17 +140,14 @@ def fyers_auto_login():
         }, timeout=10).json()
         
         if "access_token" in token_resp:
-            add_log(f"✅ Auto-Login Successful! Mode: {'PAPER TRADE' if PAPER_TRADE_MODE else 'REAL LIVE'}")
+            add_log(f"Auto-Login Successful! Mode: {'PAPER TRADE' if PAPER_TRADE_MODE else 'REAL LIVE'}")
             return token_resp.get("access_token")
         else:
-            add_log(f"❌ Token Error: {token_resp}")
+            add_log(f"Token Error: {token_resp}")
     except Exception as e:
-        add_log(f"❌ Auto-Login Failed: {e}")
+        add_log(f"Auto-Login Failed: {e}")
     return None
 
-# ==============================================================================
-# 5. INDICATORS & API FUNCTIONS
-# ==============================================================================
 def calc_ema(prices, period):
     ema = list()
     k = 2 / (period + 1)
@@ -242,7 +227,7 @@ def execute_fyers_order(token, opt_symbol, side, qty, reason):
     if not opt_symbol:
         return False
     ltp = get_option_ltp(token, opt_symbol)
-    add_log(f"🎯 {side} | {opt_symbol} | Qty: {qty} | Option LTP: ₹{ltp} | {reason}")
+    add_log(f"{side} | {opt_symbol} | Qty: {qty} | Option LTP: {ltp} | {reason}")
     
     if PAPER_TRADE_MODE:
         return True
@@ -253,9 +238,6 @@ def execute_fyers_order(token, opt_symbol, side, qty, reason):
     add_log(f"Broker Response: {resp}")
     return resp.get('s') == 'ok'
 
-# ==============================================================================
-# 6. TRADING CYCLE LOGIC
-# ==============================================================================
 def run_one_cycle():
     first = itemgetter(0)
     last = itemgetter(-1)
@@ -267,3 +249,37 @@ def run_one_cycle():
     now = now_dt.time()
     today_date = now_dt.date()
 
+    if state.get("login_date") != today_date or state.get("token") is None:
+        token = fyers_auto_login()
+        if token:
+            fut_sym, opt_list = get_active_nifty_contracts()
+            state.update({
+                "token": token,
+                "login_date": today_date,
+                "fut_symbol": fut_sym,
+                "opt_list": opt_list,
+                "position": None,
+                "trade_count": 0,
+                "range_locked": False
+            })
+        else:
+            return
+
+    if now_dt.weekday() >= 5 or now < datetime.time(9, 15) or now > datetime.time(15, 20):
+        return
+
+    token = state.get("token")
+    fut_sym = state.get("fut_symbol")
+    opt_list = state.get("opt_list")
+
+    try:
+        candles = fetch_5m_candles(token, fut_sym)
+        if not candles or len(candles) < 30:
+            return
+
+        ema9, ema15, macd, signal, vwap, st_green = calculate_indicators(candles)
+        
+        combined_data = list()
+        for c_row, e9, e15, m, sig, vw, stg in zip(candles, ema9, ema15, macd, signal, vwap, st_green):
+            ts, o, h, l, c, v = c_row
+            c_date = datetime.datetime.fromtimestamp(ts, IST).date()
