@@ -1,7 +1,6 @@
 import os
 import time
 import datetime
-import threading
 import csv
 import io
 import pytz
@@ -35,16 +34,34 @@ TOTAL_QTY = LOT_SIZE * 2
 MAX_DAILY_TRADES = 4
 
 app = Flask(__name__)
-live_status_logs = list()
-engine_started = False
+
+# Global State Memory
+state = {
+    "logs": list(),
+    "token": None,
+    "login_date": None,
+    "fut_symbol": "",
+    "opt_list": None,
+    "position": None,
+    "active_opt": "",
+    "trade_count": 0,
+    "lot1_exited": False,
+    "range_locked": False,
+    "5m_high": 0.0,
+    "5m_low": 0.0,
+    "prev_high": 0.0,
+    "prev_low": 0.0,
+    "is_gap": False
+}
 
 def add_log(msg):
     t_str = datetime.datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')
     full_msg = f"[{t_str} IST] {msg}"
     print(full_msg, flush=True)
-    live_status_logs.append(full_msg)
-    if len(live_status_logs) > 60:
-        live_status_logs.pop(0)
+    logs = state.get("logs")
+    logs.append(full_msg)
+    if len(logs) > 60:
+        logs.pop(0)
 
 def get_ist_now():
     return datetime.datetime.now(IST)
@@ -65,39 +82,38 @@ def get_active_nifty_contracts():
     first = itemgetter(0)
     second = itemgetter(1)
 
-    while True:
-        try:
-            url = "https://fyers.in"
-            resp = requests.get(url, timeout=15)
-            reader = csv.reader(io.StringIO(resp.text))
-            
-            now_ts = int(time.time())
-            futures = list()
-            options = list()
-            
-            for row in reader:
-                if len(row) > 16 and get_und(row) == "NIFTY":
-                    exp_ts = int(get_exp(row))
-                    if exp_ts > now_ts:
-                        inst = get_inst(row)
-                        sym = get_sym(row)
-                        if inst == "FUTIDX":
-                            futures.append((exp_ts, sym))
-                        elif inst == "OPTIDX":
-                            options.append((exp_ts, float(get_strk(row)), get_opt(row), sym))
-                            
-            futures.sort(key=first)
-            active_fut_symbol = second(first(futures))
-            
-            options.sort(key=first)
-            nearest_opt_exp = first(first(options))
-            current_week_opts = list(filter(lambda x: first(x) == nearest_opt_exp, options))
-            
-            add_log(f"📅 Active Future Selected: {active_fut_symbol}")
-            return active_fut_symbol, current_week_opts
-        except Exception as e:
-            add_log(f"⚠️ Retrying Symbol Master: {e}")
-            time.sleep(5)
+    try:
+        url = "https://fyers.in"
+        resp = requests.get(url, timeout=15)
+        reader = csv.reader(io.StringIO(resp.text))
+        
+        now_ts = int(time.time())
+        futures = list()
+        options = list()
+        
+        for row in reader:
+            if len(row) > 16 and get_und(row) == "NIFTY":
+                exp_ts = int(get_exp(row))
+                if exp_ts > now_ts:
+                    inst = get_inst(row)
+                    sym = get_sym(row)
+                    if inst == "FUTIDX":
+                        futures.append((exp_ts, sym))
+                    elif inst == "OPTIDX":
+                        options.append((exp_ts, float(get_strk(row)), get_opt(row), sym))
+                        
+        futures.sort(key=first)
+        active_fut_symbol = second(first(futures))
+        
+        options.sort(key=first)
+        nearest_opt_exp = first(first(options))
+        current_week_opts = list(filter(lambda x: first(x) == nearest_opt_exp, options))
+        
+        add_log(f"📅 Active Future Selected: {active_fut_symbol}")
+        return active_fut_symbol, current_week_opts
+    except Exception as e:
+        add_log(f"⚠️ Symbol Master Error: {e}")
+        return "", None
 
 def find_exact_option_symbol(opt_list, strike_price, opt_type):
     if not opt_list:
@@ -114,19 +130,19 @@ def fyers_auto_login():
     first = itemgetter(0)
     try:
         ses = requests.Session()
-        r1 = ses.post("https://fyers.in", json={"fy_id": encode_str(FY_ID), "app_id": "2"}).json()
+        r1 = ses.post("https://fyers.in", json={"fy_id": encode_str(FY_ID), "app_id": "2"}, timeout=10).json()
         req_key = r1.get("request_key")
         
         totp = pyotp.TOTP(TOTP_KEY).now()
-        r2 = ses.post("https://fyers.in", json={"request_key": req_key, "otp": totp}).json()
+        r2 = ses.post("https://fyers.in", json={"request_key": req_key, "otp": totp}, timeout=10).json()
         req_key2 = r2.get("request_key")
         
-        r3 = ses.post("https://fyers.in", json={"request_key": req_key2, "identity_type": "pin", "identifier": encode_str(PIN)}).json()
+        r3 = ses.post("https://fyers.in", json={"request_key": req_key2, "identity_type": "pin", "identifier": encode_str(PIN)}, timeout=10).json()
         ses.headers.update({'authorization': f"Bearer {r3.get('data').get('access_token')}"})
         
         app_prefix = first(CLIENT_ID.split("-"))
         payload = {"fyers_id": FY_ID, "app_id": app_prefix, "redirect_uri": REDIRECT_URI, "appType": "100", "code_challenge": "", "state": "None", "scope": "", "nonce": "", "response_type": "code", "create_cookie": True}
-        r4 = ses.post("https://fyers.in", json=payload).json()
+        r4 = ses.post("https://fyers.in", json=payload, timeout=10).json()
         auth_code = first(parse_qs(urlparse(r4.get('Url')).query).get('auth_code'))
         
         app_id_hash = hashlib.sha256(f"{CLIENT_ID}:{SECRET_KEY}".encode()).hexdigest()
@@ -134,7 +150,7 @@ def fyers_auto_login():
             "grant_type": "authorization_code",
             "appIdHash": app_id_hash,
             "code": auth_code
-        }).json()
+        }, timeout=10).json()
         
         if "access_token" in token_resp:
             add_log(f"✅ Auto-Login Successful! Mode: {'PAPER TRADE' if PAPER_TRADE_MODE else 'REAL LIVE'}")
@@ -209,7 +225,7 @@ def fetch_5m_candles(token, symbol):
     yesterday_str = (get_ist_now() - datetime.timedelta(days=4)).strftime("%Y-%m-%d")
     headers = {"Authorization": f"{CLIENT_ID}:{token}"}
     params = {"symbol": symbol, "resolution": "5", "date_format": "1", "range_from": yesterday_str, "range_to": today_str, "cont_flag": "1"}
-    res = requests.get("https://fyers.in", headers=headers, params=params).json()
+    res = requests.get("https://fyers.in", headers=headers, params=params, timeout=10).json()
     if res and res.get('s') == 'ok' and len(res.get('candles', list())) > 0:
         return res.get('candles')
     return None
@@ -217,7 +233,7 @@ def fetch_5m_candles(token, symbol):
 def get_option_ltp(token, opt_symbol):
     first = itemgetter(0)
     headers = {"Authorization": f"{CLIENT_ID}:{token}"}
-    res = requests.get("https://fyers.in", headers=headers, params={"symbols": opt_symbol}).json()
+    res = requests.get("https://fyers.in", headers=headers, params={"symbols": opt_symbol}, timeout=10).json()
     if res and res.get('s') == 'ok' and len(res.get('d', list())) > 0:
         first_item = first(res.get('d'))
         return float(first_item.get('v').get('lp'))
@@ -234,28 +250,17 @@ def execute_fyers_order(token, opt_symbol, side, qty, reason):
         
     headers = {"Authorization": f"{CLIENT_ID}:{token}", "Content-Type": "application/json"}
     order_data = {"symbol": opt_symbol, "qty": qty, "type": 2, "side": 1 if side == "BUY" else -1, "productType": "INTRADAY", "limitPrice": 0, "stopPrice": 0, "validity": "DAY", "disclosedQty": 0, "offlineOrder": False}
-    resp = requests.post("https://fyers.in", headers=headers, json=order_data).json()
+    resp = requests.post("https://fyers.in", headers=headers, json=order_data, timeout=10).json()
     add_log(f"Broker Response: {resp}")
     return resp.get('s') == 'ok'
 
 # ==============================================================================
-# 6. BACKGROUND TRADING ENGINE
+# 6. DIRECT EXECUTION ON EVERY PING (NO BACKGROUND THREAD NEEDED)
 # ==============================================================================
-def run_algo_engine():
+def run_one_cycle():
     first = itemgetter(0)
     last = itemgetter(-1)
     second_last = itemgetter(-2)
     get_high = itemgetter(2)
     get_low = itemgetter(3)
 
-    access_token = None
-    last_login_date = None
-    nifty_fut_symbol = ""
-    weekly_opt_list = None
-
-    position = None
-    active_option = ""
-    trade_count = 0
-    lot1_exited = False
-    range_5m_locked = False
-    first_5m_high, first_5m_low = 0.0, 0.0
